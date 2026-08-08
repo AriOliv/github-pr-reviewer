@@ -70,11 +70,56 @@ class GitHub:
                 return comments
             page += 1
 
+    def list_issues(self, state: str = "all") -> list[dict[str, Any]]:
+        """Repository issues (PRs filtered out), newest first (paginated)."""
+        issues: list[dict[str, Any]] = []
+        page = 1
+        while True:
+            r = self.s.get(
+                self._url("/issues"),
+                params={"state": state, "per_page": 100, "page": page},
+            )
+            r.raise_for_status()
+            batch = r.json()
+            issues.extend(i for i in batch if "pull_request" not in i)
+            if len(batch) < 100:
+                return issues
+            page += 1
+
     # ------------------------------------------------------------------ #
     def post_issue_comment(self, number: int, body: str) -> None:
         """A plain comment in the PR conversation (used for the summary)."""
         r = self.s.post(self._url(f"/issues/{number}/comments"), json={"body": body})
         r.raise_for_status()
+
+    def update_issue_comment(self, comment_id: int, body: str) -> None:
+        """Edit an existing issue/PR comment in place (marker-based upsert)."""
+        r = self.s.patch(
+            self._url(f"/issues/comments/{comment_id}"), json={"body": body}
+        )
+        r.raise_for_status()
+
+    def create_issue(
+        self, title: str, body: str, labels: list[str] | None = None
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {"title": title, "body": body}
+        if labels:
+            payload["labels"] = labels
+        r = self.s.post(self._url("/issues"), json=payload)
+        r.raise_for_status()
+        return r.json()
+
+    def update_issue(
+        self, number: int, body: str | None = None, state: str | None = None
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {}
+        if body is not None:
+            payload["body"] = body
+        if state is not None:
+            payload["state"] = state
+        r = self.s.patch(self._url(f"/issues/{number}"), json=payload)
+        r.raise_for_status()
+        return r.json()
 
     def post_review_comment(
         self,

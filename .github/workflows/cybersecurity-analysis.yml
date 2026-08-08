@@ -20,9 +20,13 @@ on:
     - cron: "17 6 * * 1"
   push:
     branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened]
 
 permissions:
   contents: read
+  issues: write          # update the tracking issue (push/schedule/dispatch runs)
+  pull-requests: write   # comment findings on the PR (pull_request runs)
 
 jobs:
   security-scan:
