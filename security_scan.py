@@ -250,11 +250,12 @@ def detect_pr_number() -> int | None:
     if event_path and pathlib.Path(event_path).is_file():
         try:
             event = json.loads(pathlib.Path(event_path).read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+            num = (event.get("pull_request") or {}).get("number")
+            if num is not None:
+                return int(num)
+        except (OSError, json.JSONDecodeError, AttributeError, TypeError, ValueError):
+            # A malformed or unexpectedly-shaped event file is not a PR context.
             return None
-        num = (event.get("pull_request") or {}).get("number")
-        if num:
-            return int(num)
     return None
 
 
