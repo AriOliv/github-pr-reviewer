@@ -197,6 +197,16 @@ long-lived AI secrets.
   or switch the trigger to `pull_request_target` after evaluating its security
   implications.
 
+## Quick Start
+
+To test the reviewer locally, ensure dependencies are installed and set your `GEMINI_API_KEY`:
+
+```bash
+pip install -r requirements.txt
+export GEMINI_API_KEY="your-api-key"
+python review_pr.py --pr <PR_NUMBER> --repo <OWNER/REPO>
+```
+
 ## Sources
 
 - https://ai.google.dev/gemini-api/docs/agents
