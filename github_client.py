@@ -38,6 +38,15 @@ class GitHub:
         r.raise_for_status()
         return r.json()
 
+    def get_user_permission(self, username: str) -> str:
+        """The user's permission on the repo: admin | maintain | write | read |
+        none. Used to authorize ledger commands (/dismiss, /reopen)."""
+        r = self.s.get(self._url(f"/collaborators/{username}/permission"))
+        if r.status_code == 404:
+            return "none"
+        r.raise_for_status()
+        return r.json().get("permission", "none")
+
     def get_pr_files(self, number: int) -> list[dict[str, Any]]:
         """All changed files of the PR (paginated; `patch` is the per-file diff)."""
         files: list[dict[str, Any]] = []
@@ -187,12 +196,17 @@ def build_basic_auth_header(token: str, username: str = "x-access-token") -> str
     return f"Basic {base64.b64encode(f'{username}:{token}'.encode()).decode()}"
 
 
-def render_finding_comment(f: dict[str, Any], emoji: str) -> str:
+def render_finding_comment(
+    f: dict[str, Any], emoji: str, fingerprint: str | None = None
+) -> str:
     """Format one finding as a GitHub markdown comment body.
 
     A `suggestion` field becomes a GitHub suggested change: the fenced
     ```suggestion block renders with a "Commit suggestion" button that applies
     the replacement to the PR branch in one click.
+
+    `fingerprint` is the ledger id: it is shown so a maintainer can dismiss a
+    finding for good by commenting `/dismiss <id>`.
     """
     body = textwrap.dedent(
         f"""\
@@ -205,8 +219,8 @@ def render_finding_comment(f: dict[str, Any], emoji: str) -> str:
     suggestion = f.get("suggestion")
     if suggestion:
         body += f"\n\n```suggestion\n{suggestion.rstrip()}\n```"
-    body += (
-        "\n\n<sub>🤖 Automated review by a Gemini managed agent · advisory, "
-        "verify before relying on it.</sub>"
-    )
+    tail = "🤖 Automated review by a Gemini managed agent · advisory, verify before relying on it."
+    if fingerprint:
+        tail += f" · id `{fingerprint}` — dismiss with `/dismiss {fingerprint} <reason>`"
+    body += f"\n\n<sub>{tail}</sub>"
     return body
