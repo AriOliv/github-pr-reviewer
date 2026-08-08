@@ -33,6 +33,7 @@ from typing import Any
 
 from google import genai
 
+import memory
 from github_client import GitHub
 from review_pr import (
     BASE_AGENT,
@@ -312,6 +313,9 @@ def main() -> int:
 
     skill_title, skill_text = load_skill(skill_name)
     system_instruction = f"{SCAN_SYSTEM_INSTRUCTION}\n\n# Review skill\n\n{skill_text}"
+    mem = memory.render_memory(memory.load_memory(pathlib.Path.cwd()), "scan")
+    if mem:
+        system_instruction += f"\n\n{mem}"
 
     environment = build_environment(
         clone_url=f"{server_url}/{repo}.git",

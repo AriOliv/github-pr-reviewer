@@ -42,6 +42,7 @@ from typing import Any
 from google import genai
 
 import ledger
+import memory
 from github_client import (
     GitHub,
     build_basic_auth_header,
@@ -318,6 +319,7 @@ def run_review(
     skill_text: str,
     prior_state: dict[str, Any] | None,
     private: bool,
+    memory_block: str = "",
 ) -> tuple[dict[str, Any], str | None, str | None, str]:
     """Run the review with a resume cascade.
 
@@ -335,6 +337,8 @@ def run_review(
     Returns (findings, environment_id, interaction_id, mode).
     """
     system_instruction = f"{SYSTEM_INSTRUCTION}\n\n# Review skill\n\n{skill_text}"
+    if memory_block:
+        system_instruction += f"\n\n{memory_block}"
 
     attempts: list[tuple[str, dict[str, Any] | str, str | None]] = []
     if prior_state:
@@ -517,6 +521,9 @@ def main() -> int:
     changed_paths = [f.get("filename", "") for f in files]
     ledger_records = ledger.load_for_files(pathlib.Path.cwd(), changed_paths)
     memory_context = ledger.render_prompt_context(ledger_records)
+
+    # Layer 1: durable project conventions/decisions applied to every review.
+    memory_block = memory.render_memory(memory.load_memory(pathlib.Path.cwd()), "review")
     if ledger_records:
         print(
             f"Loaded {len(ledger_records)} ledger record(s) for changed files "
@@ -557,7 +564,8 @@ def main() -> int:
     )
     client = genai.Client()
     result, env_id, int_id, mode = run_review(
-        client, environment, prompt, skill_text, prior_state, private
+        client, environment, prompt, skill_text, prior_state, private,
+        memory_block=memory_block,
     )
     print(f"Review completed ({mode}).")
 

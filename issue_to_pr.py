@@ -8,6 +8,8 @@ import subprocess
 import sys
 from google import genai
 
+import memory
+
 
 def run_cmd(cmd: list[str]) -> str:
     res = subprocess.run(cmd, capture_output=True, text=True)
@@ -56,6 +58,10 @@ def main() -> int:
         "- 'pr_description': string (clear explanation of changes made, ending with 'Fixes #<issue_number>')\n"
         "- 'file_changes': array of objects with 'path' (relative file path) and 'content' (full complete file contents)"
     )
+
+    mem = memory.render_memory(memory.load_memory("."), "issue")
+    if mem:
+        system_instruction += "\n\n" + mem
 
     prompt = f"""
 Issue #{issue_number}: {issue_title}
