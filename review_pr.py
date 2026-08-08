@@ -54,7 +54,7 @@ from schema import (
     SYSTEM_INSTRUCTION,
 )
 
-BASE_AGENT = os.environ.get("BASE_AGENT", "antigravity-preview-05-2026")
+BASE_AGENT = os.environ.get("BASE_AGENT", "gemini-3.6-flash")
 SKILLS_DIR = pathlib.Path(__file__).parent / "skills"
 SHIM_SOURCE = pathlib.Path(__file__).parent / "bin" / "gh-shim.sh"
 REPO_MOUNT = "/workspace/repo"
@@ -381,7 +381,7 @@ def run_review(
     if last_exc:
         err_msg = str(last_exc).lower()
         if "permission" in err_msg or "403" in err_msg or "not found" in err_msg:
-            model_name = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+            model_name = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
             print(f"ℹ️ Managed Agents permission not available for this API key. Falling back to standard Gemini model ('{model_name}') …")
             try:
                 response = client.models.generate_content(
