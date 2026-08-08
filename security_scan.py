@@ -28,10 +28,12 @@ import json
 import os
 import pathlib
 import sys
+import time
 from typing import Any
 
 from google import genai
 
+from github_client import GitHub
 from review_pr import (
     BASE_AGENT,
     REPO_MOUNT,
@@ -62,12 +64,25 @@ SKIP_DIRS = {
 MAX_FILE_BYTES = 200_000
 MAX_TOTAL_BYTES = 600_000
 
+# Hidden markers so we can update our own issue/comment in place instead of
+# posting a new one every run.
+TRACKING_MARKER = "<!-- cybersecurity-analysis:tracking -->"
+PR_COMMENT_MARKER = "<!-- cybersecurity-analysis:pr-comment -->"
 
-def build_scan_prompt(repo: str) -> str:
+
+def build_scan_prompt(repo: str, pr_number: int | None = None) -> str:
+    head = f"Perform a security audit of the repository {repo}, mounted at {REPO_MOUNT}.\n"
+    if pr_number:
+        head += (
+            f"This run targets pull request #{pr_number}. First bring the mounted "
+            f"repository to the PR's head state:\n"
+            f"   git -C {REPO_MOUNT} fetch origin pull/{pr_number}/head\n"
+            f"   git -C {REPO_MOUNT} checkout --detach FETCH_HEAD\n"
+            f"(Authentication is injected automatically; never add credentials.)\n"
+        )
     return (
-        f"Perform a security audit of the repository {repo}, mounted at "
-        f"{REPO_MOUNT}.\n"
-        f"Explore the codebase — application source, configuration, CI "
+        head
+        + f"Explore the codebase — application source, configuration, CI "
         f"workflows, dependency manifests, and shell scripts — and identify "
         f"security vulnerabilities per the review skill in your instructions. "
         f"Read what you need to confirm each issue; be efficient and avoid "
@@ -208,6 +223,75 @@ def render_report(repo: str, result: dict[str, Any], skill_title: str, mode: str
     return "\n".join(lines)
 
 
+def _run_url() -> str:
+    server = os.environ.get("GITHUB_SERVER_URL", "https://github.com")
+    repo = os.environ.get("GITHUB_REPOSITORY", "")
+    run_id = os.environ.get("GITHUB_RUN_ID")
+    return f"{server}/{repo}/actions/runs/{run_id}" if run_id and repo else ""
+
+
+def _posted_body(report: str, marker: str) -> str:
+    """The report plus an update footer and a hidden marker for in-place upsert."""
+    ts = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime())
+    foot = f"\n\n<sub>🤖 Automated cybersecurity analysis · updated {ts}"
+    url = _run_url()
+    if url:
+        foot += f" · [run log]({url})"
+    foot += "</sub>\n" + marker
+    return report + foot
+
+
+def detect_pr_number() -> int | None:
+    """PR number from PR_NUMBER or the Actions pull_request event, else None."""
+    n = os.environ.get("PR_NUMBER", "").strip()
+    if n.isdigit():
+        return int(n)
+    event_path = os.environ.get("GITHUB_EVENT_PATH")
+    if event_path and pathlib.Path(event_path).is_file():
+        try:
+            event = json.loads(pathlib.Path(event_path).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        num = (event.get("pull_request") or {}).get("number")
+        if num:
+            return int(num)
+    return None
+
+
+def upsert_pr_comment(gh: GitHub, pr_number: int, report: str) -> str:
+    """Post the report as a PR comment, updating our previous one in place."""
+    body = _posted_body(report, PR_COMMENT_MARKER)
+    try:
+        for c in reversed(gh.list_issue_comments(pr_number)):
+            if PR_COMMENT_MARKER in (c.get("body") or ""):
+                gh.update_issue_comment(c["id"], body)
+                return f"updated comment on PR #{pr_number}"
+        gh.post_issue_comment(pr_number, body)
+        return f"created comment on PR #{pr_number}"
+    except Exception as exc:
+        print(f"⚠️  could not post PR comment: {exc}", file=sys.stderr)
+        return "PR comment failed"
+
+
+def upsert_tracking_issue(gh: GitHub, title: str, report: str) -> str:
+    """Maintain a single tracking issue, updating (and reopening) it in place."""
+    body = _posted_body(report, TRACKING_MARKER)
+    try:
+        for issue in gh.list_issues(state="all"):
+            if TRACKING_MARKER in (issue.get("body") or ""):
+                gh.update_issue(
+                    issue["number"],
+                    body=body,
+                    state="open" if issue.get("state") == "closed" else None,
+                )
+                return f"updated tracking issue #{issue['number']}"
+        created = gh.create_issue(title, body)
+        return f"created tracking issue #{created['number']}"
+    except Exception as exc:
+        print(f"⚠️  could not upsert tracking issue: {exc}", file=sys.stderr)
+        return "tracking issue failed"
+
+
 def main() -> int:
     try:
         repo = os.environ["GITHUB_REPOSITORY"]
@@ -217,9 +301,13 @@ def main() -> int:
         print(f"❌ Missing required env variable: {exc}", file=sys.stderr)
         return 1
 
+    api_url = os.environ.get("GITHUB_API_URL", "https://api.github.com")
     server_url = os.environ.get("GITHUB_SERVER_URL", "https://github.com")
     skill_name = os.environ.get("REVIEW_SKILL", "security-review")
     fail_on = os.environ.get("FAIL_ON", "never").lower()
+    report_issue = os.environ.get("REPORT_ISSUE", "1") == "1"
+    report_pr_comment = os.environ.get("REPORT_PR_COMMENT", "1") == "1"
+    pr_number = detect_pr_number()
 
     skill_title, skill_text = load_skill(skill_name)
     system_instruction = f"{SCAN_SYSTEM_INSTRUCTION}\n\n# Review skill\n\n{skill_text}"
@@ -234,9 +322,10 @@ def main() -> int:
         private=bool(gh_token),
         enable_gh=False,
     )
-    prompt = build_scan_prompt(repo)
+    prompt = build_scan_prompt(repo, pr_number)
 
-    print(f"🔒 Scanning {repo} with skill '{skill_name}' …")
+    ctx = f"PR #{pr_number}" if pr_number else "the default branch"
+    print(f"🔒 Scanning {repo} ({ctx}) with skill '{skill_name}' …")
     client = genai.Client()
     result, mode = run_scan(client, repo, environment, prompt, system_instruction)
     findings = result.get("findings", [])
@@ -248,6 +337,17 @@ def main() -> int:
         with open(summary_path, "a", encoding="utf-8") as fh:
             fh.write(report + "\n")
     print("\n" + report)
+
+    # Post the report: a PR comment in PR context, else the tracking issue.
+    if gh_token:
+        gh = GitHub(api_url, repo, gh_token)
+        if pr_number and report_pr_comment:
+            print(f"💬 {upsert_pr_comment(gh, pr_number, report)}.")
+        elif not pr_number and report_issue:
+            title = os.environ.get("TRACKING_ISSUE_TITLE", "🔒 Security scan report")
+            print(f"📋 {upsert_tracking_issue(gh, title, report)}.")
+    else:
+        print("ℹ️ No GitHub token; skipping issue/PR posting.")
 
     if fail_on != "never":
         threshold = SEVERITY_ORDER.get(fail_on)
