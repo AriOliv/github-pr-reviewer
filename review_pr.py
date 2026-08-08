@@ -41,6 +41,7 @@ from typing import Any
 
 from google import genai
 
+import ledger
 from github_client import (
     GitHub,
     build_basic_auth_header,
@@ -59,7 +60,6 @@ SKILLS_DIR = pathlib.Path(__file__).parent / "skills"
 SHIM_SOURCE = pathlib.Path(__file__).parent / "bin" / "gh-shim.sh"
 REPO_MOUNT = "/workspace/repo"
 GH_WRAPPER = "/workspace/bin/gh"
-STATE_MARKER_RE = re.compile(r"<!-- github-pr-reviewer:state (\{.*?\}) -->")
 
 
 # --------------------------------------------------------------------------- #
@@ -82,7 +82,7 @@ def load_skill(name: str) -> tuple[str, str]:
 # Follow-up state (persisted as a hidden marker in the summary comment)
 # --------------------------------------------------------------------------- #
 def build_state_marker(state: dict[str, Any]) -> str:
-    return f"<!-- github-pr-reviewer:state {json.dumps(state)} -->"
+    return ledger.build_state_marker(state)
 
 
 def find_state(gh: GitHub, pr_number: int, skill_name: str) -> dict[str, Any] | None:
@@ -93,14 +93,8 @@ def find_state(gh: GitHub, pr_number: int, skill_name: str) -> dict[str, Any] | 
         print(f"⚠️  could not list PR comments for state recovery: {exc}", file=sys.stderr)
         return None
     for c in reversed(comments):
-        m = STATE_MARKER_RE.search(c.get("body") or "")
-        if not m:
-            continue
-        try:
-            state = json.loads(m.group(1))
-        except json.JSONDecodeError:
-            continue
-        if state.get("skill") == skill_name and state.get("interaction_id"):
+        state = ledger.parse_state_marker(c.get("body") or "")
+        if state and state.get("skill") == skill_name and state.get("interaction_id"):
             return state
     return None
 
@@ -220,6 +214,7 @@ def build_prompt(
     diff_prompt: str,
     enable_gh: bool,
     follow_up: bool,
+    memory_context: str = "",
 ) -> str:
     parts = [
         f"You are reviewing GitHub pull request #{pr_number} of {repo} "
@@ -253,6 +248,12 @@ def build_prompt(
             f"{GH_WRAPPER} pr view {pr_number} --repo {repo} --comments). Do "
             f"not post comments, approve, or modify anything with it; the "
             f"workflow posts the review.\n"
+        )
+    if memory_context:
+        parts.append(
+            f"{memory_context}\n"
+            f"(This memory comes from earlier reviews and maintainer decisions on "
+            f"these files. Honor it: never re-raise a decided item.)\n"
         )
     parts.append(
         f"The unified diff of the pull request is below. Review THESE changes. "
@@ -439,7 +440,11 @@ def post_results(
 
     overflow: list[str] = []
     for f in findings:
-        body = render_finding_comment(f, SEVERITY_EMOJI.get(f.get("severity", "info"), ""))
+        body = render_finding_comment(
+            f,
+            SEVERITY_EMOJI.get(f.get("severity", "info"), ""),
+            fingerprint=ledger.fingerprint(f),
+        )
         anchored = False
         try:
             start_line = f.get("start_line")
@@ -507,6 +512,17 @@ def main() -> int:
     diff_prompt = build_diff_prompt(files)
     private = bool(gh.get_repo().get("private"))
 
+    # Read path: load the committed ledger for the changed files so the agent
+    # doesn't re-raise resolved/dismissed findings (fork-safe, read-only).
+    changed_paths = [f.get("filename", "") for f in files]
+    ledger_records = ledger.load_for_files(pathlib.Path.cwd(), changed_paths)
+    memory_context = ledger.render_prompt_context(ledger_records)
+    if ledger_records:
+        print(
+            f"Loaded {len(ledger_records)} ledger record(s) for changed files "
+            f"({len(ledger.suppressed_fingerprints(ledger_records))} suppressed)."
+        )
+
     prior_state = None
     if persist and not dry_run:
         prior_state = find_state(gh, pr_number, skill_name)
@@ -531,6 +547,7 @@ def main() -> int:
         diff_prompt=diff_prompt,
         enable_gh=enable_gh,
         follow_up=bool(prior_state),
+        memory_context=memory_context,
     )
 
     print(
@@ -544,21 +561,33 @@ def main() -> int:
     )
     print(f"Review completed ({mode}).")
 
+    # Enforce dismissals even if the agent ignored the memory in the prompt.
+    suppressed = ledger.suppressed_fingerprints(ledger_records)
+    if suppressed:
+        all_findings = result.get("findings", [])
+        kept = [f for f in all_findings if ledger.fingerprint(f) not in suppressed]
+        if len(kept) != len(all_findings):
+            print(f"Suppressed {len(all_findings) - len(kept)} finding(s) matching "
+                  f"dismissed ledger entries.")
+        result["findings"] = kept
+
     if dry_run:
         print(json.dumps(result, indent=2))
         return 0
 
-    state_marker = ""
+    # The marker carries the findings payload for the trusted harvest job
+    # (independent of PERSIST); resume ids are added only when follow-up memory
+    # is on and the interaction persisted.
+    state: dict[str, Any] = {
+        "v": 1,
+        "skill": skill_name,
+        "head_sha": pr["head"]["sha"],
+        "findings": [ledger.marker_finding(f) for f in result.get("findings", [])],
+    }
     if persist and int_id:
-        state_marker = build_state_marker(
-            {
-                "v": 1,
-                "skill": skill_name,
-                "interaction_id": int_id,
-                "environment_id": env_id,
-                "head_sha": pr["head"]["sha"],
-            }
-        )
+        state["interaction_id"] = int_id
+        state["environment_id"] = env_id
+    state_marker = build_state_marker(state)
 
     print("Posting results …")
     post_results(gh, pr_number, pr["head"]["sha"], skill_title, result, state_marker)

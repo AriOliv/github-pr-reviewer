@@ -20,7 +20,9 @@ Line numbers are intentionally excluded.
 
 from __future__ import annotations
 
+import base64
 import hashlib
+import json
 import pathlib
 import re
 from typing import Any
@@ -75,6 +77,43 @@ def fingerprint(finding: dict[str, Any]) -> str:
         )
     )
     return hashlib.sha1(basis.encode("utf-8")).hexdigest()[:16]
+
+
+# --------------------------------------------------------------------------- #
+# Hidden state marker (shared by review_pr.py and ledger_sync.py)
+# --------------------------------------------------------------------------- #
+# The summary comment carries a base64-wrapped JSON marker: base64 keeps the
+# payload on one line and immune to `-->` or braces appearing in model text, and
+# lets the trusted harvest job read the findings without re-reviewing.
+STATE_MARKER_RE = re.compile(r"<!-- github-pr-reviewer:state ([A-Za-z0-9+/=]+) -->")
+
+
+def build_state_marker(state: dict[str, Any]) -> str:
+    payload = base64.b64encode(
+        json.dumps(state, separators=(",", ":")).encode("utf-8")
+    ).decode("ascii")
+    return f"<!-- github-pr-reviewer:state {payload} -->"
+
+
+def parse_state_marker(text: str) -> dict[str, Any] | None:
+    m = STATE_MARKER_RE.search(text or "")
+    if not m:
+        return None
+    try:
+        return json.loads(base64.b64decode(m.group(1)).decode("utf-8"))
+    except (ValueError, json.JSONDecodeError):
+        return None
+
+
+def marker_finding(finding: dict[str, Any]) -> dict[str, Any]:
+    """The compact per-finding record embedded in the state marker."""
+    return {
+        "fp": fingerprint(finding),
+        "file": _norm_path(finding.get("file", "")),
+        "category": str(finding.get("category", "")).strip(),
+        "title": str(finding.get("title", "")).strip(),
+        "severity": str(finding.get("severity", "info")).strip(),
+    }
 
 
 # --------------------------------------------------------------------------- #
