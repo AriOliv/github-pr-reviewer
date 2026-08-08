@@ -377,7 +377,28 @@ def run_review(
                       file=sys.stderr)
                 if attempt_try == 1 and _is_connection_error(exc):
                     continue  # transport hiccup: one more try, same mode
-                break  # move on to the next mode
+    # Fallback to standard Gemini API model if Managed Agents is not permitted for this API key
+    if last_exc:
+        err_msg = str(last_exc).lower()
+        if "permission" in err_msg or "403" in err_msg or "not found" in err_msg:
+            model_name = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+            print(f"ℹ️ Managed Agents permission not available for this API key. Falling back to standard Gemini model ('{model_name}') …")
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                    config={
+                        "system_instruction": system_instruction,
+                        "response_mime_type": "application/json",
+                    },
+                )
+                raw = response.text or ""
+                result = _parse_json(raw)
+                return (result, None, None, f"fallback model ({model_name})")
+            except Exception as fallback_exc:
+                print(f"⚠️  Fallback to '{model_name}' failed: {fallback_exc}", file=sys.stderr)
+                raise fallback_exc from last_exc
+
     raise last_exc  # every attempt failed
 
 
