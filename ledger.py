@@ -51,7 +51,9 @@ _FRONTMATTER_FIELDS = (
 # Fingerprinting
 # --------------------------------------------------------------------------- #
 def _norm_path(path: str) -> str:
-    return pathlib.PurePosixPath(str(path).strip().replace("\\", "/")).as_posix().lstrip("./")
+    # removeprefix (not lstrip) so hidden paths survive: lstrip("./") would eat
+    # the leading dot of ".github/..." / ".pr-reviewer/...".
+    return pathlib.PurePosixPath(str(path).strip().replace("\\", "/")).as_posix().removeprefix("./")
 
 
 def _norm_title(title: str) -> str:

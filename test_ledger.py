@@ -23,6 +23,18 @@ def test_fingerprint_stability() -> None:
     assert L.fingerprint(a) != L.fingerprint({**a, "category": "security"})
 
 
+def test_dotfile_paths_are_preserved() -> None:
+    # Regression: _norm_path must not eat the leading dot of hidden paths.
+    root = pathlib.Path(tempfile.mkdtemp())
+    f = {"file": ".github/workflows/review-memory.yml", "category": "security",
+         "title": "workflow perm"}
+    rec = L.upsert_open(root, f, pr_number=1, sha="s", today="d")
+    assert rec["file"] == ".github/workflows/review-memory.yml", rec["file"]
+    # ...and it is still findable by its real path.
+    found = L.load_for_files(root, ["./.github/workflows/review-memory.yml"])
+    assert len(found) == 1 and found[0]["fingerprint"] == rec["fingerprint"]
+
+
 def test_marker_roundtrip_is_brace_and_arrow_safe() -> None:
     state = {"v": 1, "skill": "security-review", "head_sha": "abc",
              "findings": [{"fp": "a1", "file": "x.py", "category": "c",

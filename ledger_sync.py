@@ -69,7 +69,11 @@ def commit_and_push(message: str, branch: str) -> bool:
             return True
         print(f"push rejected (try {attempt}); rebasing on origin/{branch} …", file=sys.stderr)
         _git("fetch", "origin", branch, check=False)
-        _git("rebase", f"origin/{branch}", check=False)
+        if _git("rebase", f"origin/{branch}", check=False).returncode != 0:
+            # A conflicted rebase would leave the tree mid-rebase and make every
+            # retry fail; abort cleanly and surface it.
+            _git("rebase", "--abort", check=False)
+            raise SystemExit("❌ Ledger rebase hit conflicts; aborted — re-run the action.")
     raise SystemExit("❌ Could not push ledger updates after a rebase retry.")
 
 
