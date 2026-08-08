@@ -54,7 +54,7 @@ from schema import (
     SYSTEM_INSTRUCTION,
 )
 
-BASE_AGENT = os.environ.get("BASE_AGENT", "gemini-3.6-flash")
+BASE_AGENT = os.environ.get("BASE_AGENT", "antigravity-preview-05-2026")
 SKILLS_DIR = pathlib.Path(__file__).parent / "skills"
 SHIM_SOURCE = pathlib.Path(__file__).parent / "bin" / "gh-shim.sh"
 REPO_MOUNT = "/workspace/repo"
@@ -377,27 +377,25 @@ def run_review(
                       file=sys.stderr)
                 if attempt_try == 1 and _is_connection_error(exc):
                     continue  # transport hiccup: one more try, same mode
-    # Fallback to standard Gemini API model if Managed Agents is not permitted for this API key
+    # Fallback to standard Gemini API model (Gemini 3.6) if Managed Agents fails
     if last_exc:
-        err_msg = str(last_exc).lower()
-        if "permission" in err_msg or "403" in err_msg or "not found" in err_msg:
-            model_name = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
-            print(f"ℹ️ Managed Agents permission not available for this API key. Falling back to standard Gemini model ('{model_name}') …")
-            try:
-                response = client.models.generate_content(
-                    model=model_name,
-                    contents=prompt,
-                    config={
-                        "system_instruction": system_instruction,
-                        "response_mime_type": "application/json",
-                    },
-                )
-                raw = response.text or ""
-                result = _parse_json(raw)
-                return (result, None, None, f"fallback model ({model_name})")
-            except Exception as fallback_exc:
-                print(f"⚠️  Fallback to '{model_name}' failed: {fallback_exc}", file=sys.stderr)
-                raise fallback_exc from last_exc
+        model_name = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
+        print(f"ℹ️ Managed Agents unavailable ({last_exc}). Falling back to standard Gemini model ('{model_name}') …")
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config={
+                    "system_instruction": system_instruction,
+                    "response_mime_type": "application/json",
+                },
+            )
+            raw = response.text or ""
+            result = _parse_json(raw)
+            return (result, None, None, f"fallback model ({model_name})")
+        except Exception as fallback_exc:
+            print(f"⚠️ Fallback to '{model_name}' failed: {fallback_exc}", file=sys.stderr)
+            raise fallback_exc from last_exc
 
     raise last_exc  # every attempt failed
 
