@@ -1,0 +1,54 @@
+# GitHub Actions workflow for the managed-agent PR reviewer.
+
+name: pr-review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "Pull request number to review"
+        required: true
+      review_skill:
+        description: "Review skill (folder under skills/ or tools/pr-reviewer/skills/)"
+        required: false
+        default: "security-review"
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  agent-review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install reviewer dependencies
+        run: |
+          if [ -f tools/pr-reviewer/requirements.txt ]; then
+            pip install --no-cache-dir -r tools/pr-reviewer/requirements.txt
+          else
+            pip install --no-cache-dir -r requirements.txt
+          fi
+
+      - name: Review the pull request
+        run: |
+          if [ -f tools/pr-reviewer/review_pr.py ]; then
+            python tools/pr-reviewer/review_pr.py
+          else
+            python review_pr.py
+          fi
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
+          REVIEW_SKILL: ${{ inputs.review_skill || 'security-review' }}
+          # PERSIST: "0"    # set to 0 for stateless reviews (default: follow-ups resume the conversation)
+          # AGENT_GH: "0"   # set to 0 to remove the GitHub CLI from the sandbox
