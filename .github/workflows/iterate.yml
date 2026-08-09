@@ -1,0 +1,78 @@
+# Iterative loop: refine a bot PR from a comment, or continue an issue after a
+# clarifying-question reply. Runs in the trusted base context (issue_comment).
+name: iterate
+
+on:
+  issue_comment:
+    types: [created]
+
+# Serialize per issue/PR so concurrent comments don't race on the same branch.
+concurrency:
+  group: iterate-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write        # push refined changes / open-update PRs
+  pull-requests: write
+  issues: write
+
+jobs:
+  refine:
+    # A `/refine …` comment on a pull request.
+    if: >
+      github.event.issue.pull_request &&
+      startsWith(github.event.comment.body, '/refine')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install --no-cache-dir -r requirements.txt
+      - run: python iterate.py refine
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GEMINI_MODEL: "gemini-3.6-flash"
+          LITELLM_BASE_URL: ${{ secrets.LITELLM_BASE_URL }}
+          LITELLM_API_KEY: ${{ secrets.LITELLM_API_KEY }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          COMMENT_AUTHOR: ${{ github.event.comment.user.login }}
+
+  answer:
+    # A plain reply (not a slash-command, not from a bot) on an ISSUE. The script
+    # exits fast unless the issue is actually awaiting a clarifying answer.
+    if: >
+      !github.event.issue.pull_request &&
+      !startsWith(github.event.comment.body, '/') &&
+      github.event.comment.user.login != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install --no-cache-dir -r requirements.txt
+      - run: python iterate.py answer
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GEMINI_MODEL: "gemini-3.6-flash"
+          LITELLM_BASE_URL: ${{ secrets.LITELLM_BASE_URL }}
+          LITELLM_API_KEY: ${{ secrets.LITELLM_API_KEY }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          COMMENT_AUTHOR: ${{ github.event.comment.user.login }}
