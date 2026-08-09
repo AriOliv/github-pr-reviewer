@@ -42,6 +42,7 @@ from typing import Any
 from google import genai
 
 import ledger
+import llm
 import memory
 from github_client import (
     GitHub,
@@ -313,13 +314,14 @@ def _run_streaming(client: genai.Client, **kwargs: Any) -> tuple[str, Any]:
 
 
 def run_review(
-    client: genai.Client,
+    client: genai.Client | None,
     environment: dict[str, Any],
     prompt: str,
     skill_text: str,
     prior_state: dict[str, Any] | None,
     private: bool,
     memory_block: str = "",
+    session: str = "",
 ) -> tuple[dict[str, Any], str | None, str | None, str]:
     """Run the review with a resume cascade.
 
@@ -340,69 +342,79 @@ def run_review(
     if memory_block:
         system_instruction += f"\n\n{memory_block}"
 
-    attempts: list[tuple[str, dict[str, Any] | str, str | None]] = []
-    if prior_state:
-        if not private and prior_state.get("environment_id"):
-            attempts.append(
-                ("resumed sandbox + conversation",
-                 prior_state["environment_id"], prior_state["interaction_id"])
-            )
-        attempts.append(
-            ("fresh sandbox + resumed conversation",
-             environment, prior_state["interaction_id"])
-        )
-    attempts.append(("cold start", environment, None))
+    # Managed Agents (interactions.create) is a Google agent API that a model
+    # proxy cannot intercept. When a LiteLLM proxy is configured we default to
+    # the model-only path so 100% of spend is tracked; set USE_MANAGED_AGENTS=1
+    # to force the (untracked) agent path anyway.
+    default_agents = "0" if llm.proxy_enabled() else "1"
+    use_agents = os.environ.get("USE_MANAGED_AGENTS", default_agents) == "1"
 
     last_exc: Exception | None = None
-    for mode, env, prev_id in attempts:
-        for attempt_try in (1, 2):
-            try:
-                kwargs: dict[str, Any] = {}
-                if prev_id:
-                    kwargs["previous_interaction_id"] = prev_id
-                text, interaction = _run_streaming(
-                    client,
-                    agent=BASE_AGENT,
-                    system_instruction=system_instruction,
-                    input=prompt,
-                    environment=env,
-                    **kwargs,
+    if use_agents:
+        attempts: list[tuple[str, dict[str, Any] | str, str | None]] = []
+        if prior_state:
+            if not private and prior_state.get("environment_id"):
+                attempts.append(
+                    ("resumed sandbox + conversation",
+                     prior_state["environment_id"], prior_state["interaction_id"])
                 )
-                raw = text or _extract_text(interaction)
-                result = _parse_json(raw)
-                return (
-                    result,
-                    getattr(interaction, "environment_id", None),
-                    getattr(interaction, "id", None),
-                    mode,
-                )
-            except Exception as exc:
-                last_exc = exc
-                print(f"⚠️  attempt '{mode}' (try {attempt_try}) failed: {exc}",
-                      file=sys.stderr)
-                if attempt_try == 1 and _is_connection_error(exc):
-                    continue  # transport hiccup: one more try, same mode
-    # Fallback to standard Gemini API model (Gemini 3.6) if Managed Agents fails
-    if last_exc:
-        model_name = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
-        print(f"ℹ️ Managed Agents unavailable ({last_exc}). Falling back to standard Gemini model ('{model_name}') …")
-        try:
-            response = client.models.generate_content(
-                model=model_name,
-                contents=prompt,
-                config={
-                    "system_instruction": system_instruction,
-                    "response_mime_type": "application/json",
-                },
+            attempts.append(
+                ("fresh sandbox + resumed conversation",
+                 environment, prior_state["interaction_id"])
             )
-            raw = response.text or ""
-            result = _parse_json(raw)
-            return (result, None, None, f"fallback model ({model_name})")
-        except Exception as fallback_exc:
-            print(f"⚠️ Fallback to '{model_name}' failed: {fallback_exc}", file=sys.stderr)
-            raise fallback_exc from last_exc
+        attempts.append(("cold start", environment, None))
 
-    raise last_exc  # every attempt failed
+        for mode, env, prev_id in attempts:
+            for attempt_try in (1, 2):
+                try:
+                    kwargs: dict[str, Any] = {}
+                    if prev_id:
+                        kwargs["previous_interaction_id"] = prev_id
+                    text, interaction = _run_streaming(
+                        client,
+                        agent=BASE_AGENT,
+                        system_instruction=system_instruction,
+                        input=prompt,
+                        environment=env,
+                        **kwargs,
+                    )
+                    raw = text or _extract_text(interaction)
+                    result = _parse_json(raw)
+                    return (
+                        result,
+                        getattr(interaction, "environment_id", None),
+                        getattr(interaction, "id", None),
+                        mode,
+                    )
+                except Exception as exc:
+                    last_exc = exc
+                    print(f"⚠️  attempt '{mode}' (try {attempt_try}) failed: {exc}",
+                          file=sys.stderr)
+                    if attempt_try == 1 and _is_connection_error(exc):
+                        continue  # transport hiccup: one more try, same mode
+
+    # Model-only path: the primary route when the proxy is on, or the fallback
+    # after Managed Agents failed. Routed through llm so LiteLLM tracks spend.
+    model = llm.model_name()
+    via = "LiteLLM proxy" if llm.proxy_enabled() else "direct Gemini"
+    if use_agents and last_exc:
+        print(f"ℹ️ Managed Agents unavailable ({last_exc}). Falling back to {via} model ('{model}') …")
+    else:
+        print(f"ℹ️ Reviewing via {via} model ('{model}') …")
+    try:
+        raw = llm.generate_json(
+            prompt=prompt,
+            system_instruction=system_instruction,
+            kind="review",
+            session=session,
+            genai_client=client,
+            model=model,
+        )
+        result = _parse_json(raw)
+        return (result, None, None, f"model ({model}) via {via}")
+    except Exception as model_exc:
+        print(f"⚠️ {via} model ('{model}') failed: {model_exc}", file=sys.stderr)
+        raise model_exc from last_exc
 
 
 # --------------------------------------------------------------------------- #
@@ -494,9 +506,13 @@ def main() -> int:
     try:
         repo = os.environ["GITHUB_REPOSITORY"]
         gh_token = os.environ.get("GITHUB_TOKEN") or os.environ["GH_TOKEN"]
-        os.environ["GEMINI_API_KEY"]  # fail fast; the client reads it itself
     except KeyError as exc:
         print(f"❌ Missing required env variable: {exc}", file=sys.stderr)
+        return 1
+    # Need a model provider: the Gemini key (for Managed Agents / direct) or a
+    # LiteLLM proxy. Fail fast if neither is set.
+    if not os.environ.get("GEMINI_API_KEY") and not llm.proxy_enabled():
+        print("❌ Set GEMINI_API_KEY or LITELLM_BASE_URL.", file=sys.stderr)
         return 1
 
     api_url = os.environ.get("GITHUB_API_URL", "https://api.github.com")
@@ -562,10 +578,13 @@ def main() -> int:
         f"with skill '{skill_name}' ({len(files)} changed file(s), "
         f"{'private' if private else 'public'} repo) …"
     )
-    client = genai.Client()
+    # The genai client is only needed for Managed Agents or the direct-Gemini
+    # model path; with a LiteLLM proxy and no Gemini key, skip constructing it.
+    client = genai.Client() if os.environ.get("GEMINI_API_KEY") else None
+    session = llm.session_id("review", repo=repo, ref=pr_number)
     result, env_id, int_id, mode = run_review(
         client, environment, prompt, skill_text, prior_state, private,
-        memory_block=memory_block,
+        memory_block=memory_block, session=session,
     )
     print(f"Review completed ({mode}).")
 

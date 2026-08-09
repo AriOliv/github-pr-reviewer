@@ -50,5 +50,11 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
           REVIEW_SKILL: ${{ inputs.review_skill || 'security-review' }}
+          # Optional: route model calls through a LiteLLM proxy for cost tracking.
+          # When LITELLM_BASE_URL is set, the review uses the model-only path
+          # (all spend tracked) unless USE_MANAGED_AGENTS=1 is also set.
+          LITELLM_BASE_URL: ${{ secrets.LITELLM_BASE_URL }}
+          LITELLM_API_KEY: ${{ secrets.LITELLM_API_KEY }}
+          GEMINI_MODEL: "gemini-3.6-flash"
           # PERSIST: "0"    # set to 0 for stateless reviews (default: follow-ups resume the conversation)
           # AGENT_GH: "0"   # set to 0 to remove the GitHub CLI from the sandbox

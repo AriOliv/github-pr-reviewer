@@ -50,3 +50,6 @@ jobs:
           REVIEW_SKILL: ${{ inputs.review_skill || 'security-review' }}
           FAIL_ON: ${{ inputs.fail_on || 'never' }}
           GEMINI_MODEL: "gemini-3.6-flash"
+          # Optional: route model calls through a LiteLLM proxy for cost tracking.
+          LITELLM_BASE_URL: ${{ secrets.LITELLM_BASE_URL }}
+          LITELLM_API_KEY: ${{ secrets.LITELLM_API_KEY }}
