@@ -29,7 +29,7 @@ from typing import Any
 import ledger
 from github_client import GitHub
 
-CMD_RE = re.compile(r"^/(dismiss|reopen)\s+([0-9a-fA-F]{6,40})\s*(.*)$")
+CMD_RE = re.compile(r"^/(dismiss|reopen|fix)\s+([0-9a-fA-F]{6,40})\s*(.*)$")
 WRITE_PERMISSIONS = {"admin", "maintain", "write"}
 
 
@@ -91,11 +91,7 @@ def _latest_markers_by_skill(comments: list[dict[str, Any]]) -> list[dict[str, A
 def harvest(gh: GitHub, root: pathlib.Path, branch: str) -> None:
     pr_number = int(_env("PR_NUMBER"))
     print(f"Harvesting findings from merged PR #{pr_number} …")
-    comments = gh.list_issue_comments(pr_number)
-    markers = _latest_markers_by_skill(comments)
-    if not markers:
-        print("No review marker found on this PR; nothing to harvest.")
-        return
+    markers = _latest_markers_by_skill(gh.list_issue_comments(pr_number))
 
     sha = ""
     harvested: set[str] = set()
@@ -106,19 +102,81 @@ def harvest(gh: GitHub, root: pathlib.Path, branch: str) -> None:
                 root, mf, pr_number=pr_number, sha=state.get("head_sha", ""), today=_today()
             )
             harvested.add(record["fingerprint"])
-    print(f"Upserted {len(harvested)} finding(s) as open.")
+    if harvested:
+        print(f"Upserted {len(harvested)} finding(s) as open.")
 
-    # Anything still `open` on the changed files but no longer reported is fixed.
-    changed = [f.get("filename", "") for f in gh.get_pr_files(pr_number)]
     fixed = 0
-    for rec in ledger.load_for_files(root, changed):
-        if rec.get("status") == "open" and rec["fingerprint"] not in harvested:
-            if ledger.mark_fixed(root, rec["fingerprint"], sha=sha, today=_today()):
-                fixed += 1
-    if fixed:
-        print(f"Marked {fixed} previously-open finding(s) as fixed.")
+    # Anything still `open` on the changed files but no longer reported is fixed
+    # (review path — only meaningful when this PR carried a review marker).
+    if markers:
+        changed = [f.get("filename", "") for f in gh.get_pr_files(pr_number)]
+        for rec in ledger.load_for_files(root, changed):
+            if rec.get("status") == "open" and rec["fingerprint"] not in harvested:
+                if ledger.mark_fixed(root, rec["fingerprint"], sha=sha, today=_today()):
+                    fixed += 1
 
+    # A fix PR lists the exact finding ids it resolves in a hidden marker; close
+    # those regardless of which files changed (works even with no review marker).
+    try:
+        body = gh.get_pr(pr_number).get("body") or ""
+    except Exception:
+        body = ""
+    for fp in ledger.parse_fixes_marker(body):
+        if ledger.mark_fixed(root, fp, sha=sha, today=_today(),
+                             resolution=f"fixed by merged PR #{pr_number}"):
+            fixed += 1
+    if fixed:
+        print(f"Marked {fixed} finding(s) as fixed.")
+
+    if not harvested and not fixed:
+        print("Nothing to harvest from this PR.")
+        return
     commit_and_push(f"chore(ledger): harvest findings from merged PR #{pr_number}", branch)
+
+
+def _find_draft_pr_for(fp: str) -> int | None:
+    """Number of the open draft PR whose fixes-findings marker includes `fp`."""
+    res = subprocess.run(
+        ["gh", "pr", "list", "--state", "open", "--json", "number,body,isDraft"],
+        capture_output=True, text=True,
+    )
+    if res.returncode != 0 or not res.stdout.strip():
+        return None
+    import json as _json
+    try:
+        prs = _json.loads(res.stdout)
+    except ValueError:
+        return None
+    for pr in prs:
+        if pr.get("isDraft") and fp in ledger.parse_fixes_marker(pr.get("body") or ""):
+            return pr.get("number")
+    return None
+
+
+def handle_fix(gh: GitHub, fp: str, issue_number: str, author: str) -> None:
+    """Promote the draft fix PR for `fp` to ready-for-review (triggers review+CI)."""
+    if ledger.get(pathlib.Path.cwd(), fp) is None:
+        msg = f"No finding with id `{fp}` in the ledger."
+        print(msg)
+        if issue_number:
+            gh.post_issue_comment(int(issue_number), msg)
+        return
+    pr = _find_draft_pr_for(fp)
+    if pr is None:
+        msg = (f"No open draft fix PR found for `{fp}`. It may already be ready, "
+               f"or no fix was drafted for it yet.")
+        print(msg)
+        if issue_number:
+            gh.post_issue_comment(int(issue_number), msg)
+        return
+    ready = subprocess.run(["gh", "pr", "ready", str(pr)], capture_output=True, text=True)
+    if ready.returncode == 0:
+        msg = f"✅ Promoted PR #{pr} to ready-for-review (@{author}) — review + CI will run."
+    else:
+        msg = f"⚠️ Could not promote PR #{pr}: {ready.stderr.strip()}"
+    print(msg)
+    if issue_number:
+        gh.post_issue_comment(int(issue_number), msg)
 
 
 def handle_comment(gh: GitHub, root: pathlib.Path, branch: str) -> None:
@@ -131,6 +189,14 @@ def handle_comment(gh: GitHub, root: pathlib.Path, branch: str) -> None:
         print("Comment is not a ledger command; ignoring.")
         return
     action, fp, reason = m.group(1).lower(), m.group(2).lower(), m.group(3).strip()
+
+    # /fix promotes the draft fix PR for this finding to ready-for-review, which
+    # is what triggers pr-review + CI. Open to anyone with repo access (it only
+    # promotes a draft — it never merges), so it is handled before the
+    # write-permission gate that dismiss/reopen require.
+    if action == "fix":
+        handle_fix(gh, fp, issue_number, author)
+        return
 
     perm = gh.get_user_permission(author) if author else "none"
     if perm not in WRITE_PERMISSIONS:

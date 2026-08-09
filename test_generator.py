@@ -1,0 +1,50 @@
+"""Dependency-free tests for generator's pure helpers. Run: `python3 test_generator.py`."""
+
+from __future__ import annotations
+
+import os
+import sys
+import types
+
+for _n in ("google", "google.genai", "requests"):
+    sys.modules[_n] = types.ModuleType(_n)
+sys.modules["google"].genai = sys.modules["google.genai"]
+sys.modules["google.genai"].Client = object
+
+import generator as G  # noqa: E402
+
+
+def test_is_workflow_path() -> None:
+    assert G.is_workflow_path(".github/workflows/ci.yml")
+    assert G.is_workflow_path("./.github/workflows/ci.yml")
+    assert not G.is_workflow_path("src/.github/workflows/x.yml")
+    assert not G.is_workflow_path("README.md")
+
+
+def test_filter_workflow_files() -> None:
+    kept, skipped = G.filter_workflow_files(
+        [{"path": "a.py"}, {"path": ".github/workflows/x.yml"}, {"path": "b.ts"}]
+    )
+    assert [c["path"] for c in kept] == ["a.py", "b.ts"]
+    assert skipped == [".github/workflows/x.yml"]
+
+
+def test_default_base() -> None:
+    os.environ.pop("GITHUB_DEFAULT_BRANCH", None)
+    assert G.default_base() == "main"
+    os.environ["GITHUB_DEFAULT_BRANCH"] = "trunk"
+    assert G.default_base() == "trunk"
+    os.environ.pop("GITHUB_DEFAULT_BRANCH")
+
+
+def main() -> int:
+    tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
+    for t in tests:
+        t()
+        print(f"  ✓ {t.__name__}")
+    print(f"All {len(tests)} generator tests passed.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

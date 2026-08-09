@@ -33,6 +33,8 @@ from typing import Any
 
 from google import genai
 
+import generator
+import ledger
 import llm
 import memory
 from github_client import GitHub
@@ -216,14 +218,21 @@ def render_report(repo: str, result: dict[str, Any], skill_title: str, mode: str
         f"<sub>analysis mode: {mode} · skill: {skill_title}</sub>",
         "",
     ]
+    if findings:
+        lines.append(
+            "_Comment `/fix <id>` to open a fix PR for a finding, or "
+            "`/dismiss <id> <reason>` to stop it being raised._\n"
+        )
     for f in findings:
         sev = f.get("severity", "info")
         emoji = SEVERITY_EMOJI.get(sev, "")
+        fp = ledger.fingerprint(f)
         loc = f.get("file", "?")
         if f.get("line"):
             loc += f":{f['line']}"
         lines.append(f"### {emoji} {sev.upper()} — {f.get('title', '(untitled)')}")
         lines.append("")
+        lines.append(f"- **id:** `{fp}`")
         lines.append(f"- **Location:** `{loc}`")
         lines.append(f"- **Category:** {f.get('category', '-')}")
         if f.get("detail"):
@@ -304,6 +313,26 @@ def upsert_tracking_issue(gh: GitHub, title: str, report: str) -> str:
         return "tracking issue failed"
 
 
+def persist_findings(findings: list[dict[str, Any]]) -> None:
+    """Upsert the current findings into the ledger and commit (trusted context).
+
+    Reappearing 'fixed' findings reopen; 'dismissed' ones are left as-is. We do
+    not auto-close vanished findings here (that could wrongly close review-origin
+    entries); a targeted fix PR closes ids explicitly on merge via harvest."""
+    if not findings:
+        print("No findings to persist to the ledger.")
+        return
+    root = pathlib.Path.cwd()
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    sha = os.environ.get("GITHUB_SHA", "")
+    for f in findings:
+        ledger.upsert_open(root, f, pr_number=None, sha=sha, today=today)
+    pushed = generator.commit_and_push_paths(
+        [ledger.LEDGER_DIR], "chore(ledger): persist security scan findings"
+    )
+    print("📒 Ledger updated." if pushed else "📒 Ledger unchanged.")
+
+
 def main() -> int:
     try:
         repo = os.environ["GITHUB_REPOSITORY"]
@@ -367,6 +396,13 @@ def main() -> int:
             print(f"📋 {upsert_tracking_issue(gh, title, report)}.")
     else:
         print("ℹ️ No GitHub token; skipping issue/PR posting.")
+
+    # Persist findings to the ledger so they get stable ids/status and can be
+    # fixed (/fix) or dismissed (/dismiss). Only in a trusted, non-PR context
+    # (push/schedule/dispatch on the base branch): a PR run — the only path a
+    # fork can reach — never writes the ledger.
+    if not pr_number and os.environ.get("LEDGER_WRITE", "1") == "1":
+        persist_findings(findings)
 
     if fail_on != "never":
         threshold = SEVERITY_ORDER.get(fail_on)
