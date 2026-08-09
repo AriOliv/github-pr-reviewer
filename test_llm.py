@@ -15,8 +15,10 @@ _captured: dict[str, object] = {}
 
 
 class _Resp:
-    def __init__(self, payload):
+    def __init__(self, payload, status_code=200, text=""):
         self._payload = payload
+        self.status_code = status_code
+        self.text = text
 
     def raise_for_status(self):
         pass
@@ -93,6 +95,33 @@ def test_fallback_uses_genai_client_when_no_proxy() -> None:
                             session="x", genai_client=FakeClient(), model="gemini-3.6-flash")
     assert out == '{"fell":"back"}'
     assert _captured["fallback_model"] == "gemini-3.6-flash"
+
+
+def test_proxy_http_error_surfaces_body() -> None:
+    _clear_env()
+    os.environ["LITELLM_BASE_URL"] = "https://litellm.example.com"
+    os.environ["LLM_MODEL"] = "m"
+    _req.post = lambda *a, **k: _Resp(
+        None, status_code=400, text='{"error":{"message":"model not found: m"}}'
+    )
+    try:
+        llm.generate_json(prompt="P", system_instruction="S", kind="review", session="x")
+        raise AssertionError("expected RuntimeError")
+    except RuntimeError as e:
+        assert "HTTP 400" in str(e) and "model not found" in str(e)
+    _req.post = _fake_post  # restore
+
+
+def test_proxy_bad_shape_surfaces_payload() -> None:
+    _clear_env()
+    os.environ["LITELLM_BASE_URL"] = "https://litellm.example.com"
+    _req.post = lambda *a, **k: _Resp({"unexpected": 1})
+    try:
+        llm.generate_json(prompt="P", system_instruction="S", kind="scan", session="x")
+        raise AssertionError("expected RuntimeError")
+    except RuntimeError as e:
+        assert "missing choices" in str(e)
+    _req.post = _fake_post  # restore
 
 
 def test_fallback_without_client_raises() -> None:

@@ -62,10 +62,21 @@ def session_id(kind: str, *, repo: str | None = None, ref: str | int | None = No
 
 
 def _extract_openai_text(data: dict[str, Any]) -> str:
+    """Pull the assistant message text from an OpenAI-shaped response.
+
+    Raises with a snippet of the payload when the shape is unexpected — never
+    silently returns "" (an empty string would surface later as an opaque
+    'Expecting value' JSON error, hiding what the proxy actually said)."""
     try:
-        return data["choices"][0]["message"]["content"] or ""
-    except (KeyError, IndexError, TypeError):
-        return ""
+        content = data["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as exc:
+        snippet = json.dumps(data)[:500]
+        raise RuntimeError(
+            f"LiteLLM response missing choices[0].message.content: {snippet}"
+        ) from exc
+    if not content:
+        raise RuntimeError("LiteLLM returned empty message content.")
+    return content
 
 
 def generate_json(
@@ -107,8 +118,21 @@ def generate_json(
         resp = requests.post(
             f"{base}/chat/completions", headers=headers, json=payload, timeout=to
         )
-        resp.raise_for_status()
-        return _extract_openai_text(resp.json())
+        if resp.status_code >= 400:
+            # LiteLLM puts the real reason (unknown model, auth, provider error)
+            # in the body — surface it instead of a bare HTTP status.
+            raise RuntimeError(
+                f"LiteLLM proxy HTTP {resp.status_code} for model '{mdl}': "
+                f"{resp.text[:500]}"
+            )
+        try:
+            data = resp.json()
+        except ValueError as exc:
+            raise RuntimeError(
+                f"LiteLLM proxy returned non-JSON (HTTP {resp.status_code}): "
+                f"{resp.text[:500]}"
+            ) from exc
+        return _extract_openai_text(data)
 
     # Fallback: direct google-genai model call.
     if genai_client is None:
