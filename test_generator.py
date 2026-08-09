@@ -37,6 +37,34 @@ def test_default_base() -> None:
     os.environ.pop("GITHUB_DEFAULT_BRANCH")
 
 
+def test_open_pr_branches_off_base() -> None:
+    # Regression: each PR branch must be created from `base`, not current HEAD,
+    # so looped fix PRs stay isolated.
+    import os as _os
+    import tempfile
+    cmds = []
+
+    def fake_run(cmd, check=True):
+        cmds.append(cmd)
+        return types.SimpleNamespace(returncode=0, stdout="https://pr/1", stderr="")
+
+    orig = G.run_cmd
+    G.run_cmd = fake_run
+    cwd = _os.getcwd()
+    try:
+        _os.chdir(tempfile.mkdtemp())
+        ok, _ = G.open_pr(
+            branch="security-fix/x", title="t", body="b",
+            file_changes=[{"path": "a.py", "content": "x=1"}], base="main",
+        )
+    finally:
+        G.run_cmd = orig
+        _os.chdir(cwd)
+    assert ok
+    checkout = next(c for c in cmds if c[:3] == ["git", "checkout", "-B"])
+    assert checkout == ["git", "checkout", "-B", "security-fix/x", "main"], checkout
+
+
 def main() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for t in tests:

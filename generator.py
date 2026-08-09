@@ -154,7 +154,9 @@ def open_pr(
 
     run_cmd(["git", "config", "user.name", "github-actions[bot]"])
     run_cmd(["git", "config", "user.email", "github-actions[bot]@users.noreply.github.com"])
-    run_cmd(["git", "checkout", "-B", branch])
+    # Branch off `base`, not the current HEAD: when open_pr runs in a loop
+    # (fix_findings), each PR must be isolated, not stacked on the previous fix.
+    run_cmd(["git", "checkout", "-B", branch, base])
     for change in kept:
         path = change["path"]
         parent = os.path.dirname(path)
