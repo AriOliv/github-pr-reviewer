@@ -107,6 +107,22 @@ def parse_state_marker(text: str) -> dict[str, Any] | None:
         return None
 
 
+FIXES_MARKER_RE = re.compile(r"<!-- fixes-findings:\s*([0-9a-f ,]+)-->")
+
+
+def build_fixes_marker(ids: list[str]) -> str:
+    """Hidden marker on a fix PR listing the finding ids it resolves, so harvest
+    can close exactly those on merge."""
+    return f"<!-- fixes-findings: {', '.join(ids)} -->"
+
+
+def parse_fixes_marker(text: str) -> list[str]:
+    m = FIXES_MARKER_RE.search(text or "")
+    if not m:
+        return []
+    return [x.strip() for x in m.group(1).split(",") if x.strip()]
+
+
 def marker_finding(finding: dict[str, Any]) -> dict[str, Any]:
     """The compact per-finding record embedded in the state marker."""
     return {

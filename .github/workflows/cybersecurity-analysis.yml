@@ -1,7 +1,11 @@
 # GitHub Actions workflow: whole-repository cybersecurity analysis.
-# Runs the managed-agent security-review skill against the entire codebase and
-# writes the findings to the job summary. Triggered manually, weekly, and on
-# pushes to the default branch.
+# Runs the managed-agent security-review skill against the entire codebase,
+# writes findings to the job summary + the tracking issue, PERSISTS them to the
+# ledger, and opens draft fix PRs for high/critical findings.
+#
+# Runs only in trusted base-branch contexts (manual, weekly, push to main) — no
+# pull_request trigger, so every run can write the ledger safely and a fork
+# never reaches this workflow. PR diffs are already covered by pr-review.
 name: cybersecurity-analysis
 
 on:
@@ -20,13 +24,15 @@ on:
     - cron: "17 6 * * 1"
   push:
     branches: [main]
-  pull_request:
-    types: [opened, synchronize, reopened]
+    # The scan commits the ledger; ignore ledger-only pushes so it doesn't
+    # retrigger itself.
+    paths-ignore:
+      - ".pr-reviewer/**"
 
 permissions:
-  contents: read
-  issues: write          # update the tracking issue (push/schedule/dispatch runs)
-  pull-requests: write   # comment findings on the PR (pull_request runs)
+  contents: write        # persist the findings ledger
+  issues: write          # update the tracking issue
+  pull-requests: write   # open draft fix PRs
 
 jobs:
   security-scan:
@@ -34,6 +40,8 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
@@ -47,9 +55,24 @@ jobs:
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           REVIEW_SKILL: ${{ inputs.review_skill || 'security-review' }}
           FAIL_ON: ${{ inputs.fail_on || 'never' }}
           GEMINI_MODEL: "gemini-3.6-flash"
-          # Optional: route model calls through a LiteLLM proxy for cost tracking.
           LITELLM_BASE_URL: ${{ secrets.LITELLM_BASE_URL }}
           LITELLM_API_KEY: ${{ secrets.LITELLM_API_KEY }}
+
+      - name: Open draft fix PRs for high/critical findings
+        run: python fix_findings.py
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GEMINI_MODEL: "gemini-3.6-flash"
+          LITELLM_BASE_URL: ${{ secrets.LITELLM_BASE_URL }}
+          LITELLM_API_KEY: ${{ secrets.LITELLM_API_KEY }}
+          # Only draft fixes for high+ by default; lower severities stay in the
+          # ledger and can be fixed on demand with `/fix <id>`.
+          FIX_DRAFT_MIN_SEVERITY: "high"
+          FIX_MAX_DRAFTS: "5"
