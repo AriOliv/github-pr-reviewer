@@ -137,7 +137,8 @@ def harvest(gh: GitHub, root: pathlib.Path, branch: str) -> None:
 def _find_draft_pr_for(fp: str) -> int | None:
     """Number of the open draft PR whose fixes-findings marker includes `fp`."""
     res = subprocess.run(
-        ["gh", "pr", "list", "--state", "open", "--json", "number,body,isDraft"],
+        ["gh", "pr", "list", "--state", "open", "--limit", "200",
+         "--json", "number,body,isDraft"],
         capture_output=True, text=True,
     )
     if res.returncode != 0 or not res.stdout.strip():

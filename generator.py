@@ -40,12 +40,26 @@ def run_cmd(cmd: list[str], *, check: bool = True) -> subprocess.CompletedProces
     return res
 
 
+def _norm(path: str) -> str:
+    # Normalize backslashes first so a Windows-style path can't slip past the
+    # posix checks below.
+    return os.path.normpath(str(path).replace("\\", "/")).replace(os.sep, "/")
+
+
 def is_workflow_path(path: str) -> bool:
     """True for files under .github/workflows/ — the Actions GITHUB_TOKEN cannot
     push these (needs a PAT with the 'workflow' scope), and auto-committing
     runnable CI is a security risk."""
-    norm = os.path.normpath(str(path)).replace(os.sep, "/").lstrip("/")
-    return norm.startswith(".github/workflows/")
+    return _norm(path).lstrip("/").startswith(".github/workflows/")
+
+
+def is_unsafe_path(path: str) -> bool:
+    """True for paths that escape the repo root — absolute, or traversing up via
+    '..'. AI-generated file_changes must never write outside the working tree."""
+    norm = _norm(path)
+    if norm.startswith("/") or os.path.isabs(path):
+        return True
+    return norm == ".." or norm.startswith("../")
 
 
 def filter_workflow_files(
@@ -143,9 +157,15 @@ def open_pr(
     until a human promotes it).
     """
     base = base or default_base()
-    kept, skipped = filter_workflow_files(file_changes)
+    # Drop paths that would escape the repo before anything else touches disk.
+    unsafe = [c.get("path", "") for c in file_changes if is_unsafe_path(c.get("path", ""))]
+    for p in unsafe:
+        print(f"⛔ Refusing unsafe path outside the repo: {p}", file=sys.stderr)
+    safe = [c for c in file_changes if not is_unsafe_path(c.get("path", ""))]
+    kept, skipped = filter_workflow_files(safe)
     if not kept:
-        return False, f"only workflow files proposed ({', '.join(skipped)}); nothing pushable"
+        note = ", ".join(skipped + unsafe) or "none"
+        return False, f"no pushable files (workflow/unsafe only: {note})"
     if skipped:
         body += (
             f"\n\n> ⚠️ Skipped workflow file(s) {', '.join(skipped)} — the Actions "

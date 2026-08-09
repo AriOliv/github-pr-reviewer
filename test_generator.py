@@ -21,6 +21,21 @@ def test_is_workflow_path() -> None:
     assert not G.is_workflow_path("README.md")
 
 
+def test_is_workflow_path_backslash_and_traversal() -> None:
+    # Backslashes must not slip a workflow file past the filter.
+    assert G.is_workflow_path(".github\\workflows\\ci.yml")
+    # Traversal that resolves into workflows is still caught.
+    assert G.is_workflow_path("foo/../.github/workflows/ci.yml")
+
+
+def test_is_unsafe_path() -> None:
+    assert G.is_unsafe_path("/etc/passwd")
+    assert G.is_unsafe_path("../outside.txt")
+    assert G.is_unsafe_path("a/../../escape")
+    assert not G.is_unsafe_path("src/app.ts")
+    assert not G.is_unsafe_path("./a/b.py")
+
+
 def test_filter_workflow_files() -> None:
     kept, skipped = G.filter_workflow_files(
         [{"path": "a.py"}, {"path": ".github/workflows/x.yml"}, {"path": "b.ts"}]
