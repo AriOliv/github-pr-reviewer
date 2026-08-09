@@ -8,6 +8,7 @@ import subprocess
 import sys
 from google import genai
 
+import llm
 import memory
 
 
@@ -47,8 +48,11 @@ def main() -> int:
 
     print(f"🚀 Processing Issue #{issue_number}: {issue_title}")
 
-    client = genai.Client()
-    model_name = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
+    if not os.environ.get("GEMINI_API_KEY") and not llm.proxy_enabled():
+        print("Error: set GEMINI_API_KEY or LITELLM_BASE_URL", file=sys.stderr)
+        return 1
+    client = genai.Client() if os.environ.get("GEMINI_API_KEY") else None
+    model_name = llm.model_name()
 
     system_instruction = (
         "You are an expert AI software engineer. Given an issue title and description, "
@@ -72,17 +76,17 @@ Issue Description:
 Please generate the file changes to solve this issue.
 """
 
-    print(f"🤖 Generating solution using model '{model_name}' …")
-    response = client.models.generate_content(
+    via = "LiteLLM proxy" if llm.proxy_enabled() else "direct Gemini"
+    print(f"🤖 Generating solution via {via} model '{model_name}' …")
+    session = llm.session_id("issue", ref=issue_number)
+    raw_text = llm.generate_json(
+        prompt=prompt,
+        system_instruction=system_instruction,
+        kind="issue",
+        session=session,
+        genai_client=client,
         model=model_name,
-        contents=prompt,
-        config={
-            "system_instruction": system_instruction,
-            "response_mime_type": "application/json",
-        },
-    )
-
-    raw_text = response.text or "{}"
+    ) or "{}"
     if raw_text.startswith("```"):
         raw_text = raw_text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
 

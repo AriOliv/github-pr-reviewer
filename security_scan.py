@@ -33,6 +33,7 @@ from typing import Any
 
 from google import genai
 
+import llm
 import memory
 from github_client import GitHub
 from review_pr import (
@@ -128,38 +129,47 @@ def collect_repo_text(root: pathlib.Path) -> str:
 
 
 def run_scan(
-    client: genai.Client,
+    client: genai.Client | None,
     repo: str,
     environment: dict[str, Any],
     prompt: str,
     system_instruction: str,
+    session: str = "",
 ) -> tuple[dict[str, Any], str]:
     """Run the audit, retrying transport hiccups and falling back to a plain
-    Gemini model on any Managed Agents error. Returns (findings, mode)."""
-    last_exc: Exception | None = None
-    for attempt_try in (1, 2):
-        try:
-            text, interaction = _run_streaming(
-                client,
-                agent=BASE_AGENT,
-                system_instruction=system_instruction,
-                input=prompt,
-                environment=environment,
-            )
-            raw = text or _extract_text(interaction)
-            return _parse_json(raw), "managed agent"
-        except Exception as exc:
-            last_exc = exc
-            print(f"⚠️  scan attempt (try {attempt_try}) failed: {exc}", file=sys.stderr)
-            if attempt_try == 1 and _is_connection_error(exc):
-                continue  # transport hiccup: one more try
-            break
+    model call on any Managed Agents error. With a LiteLLM proxy configured, go
+    straight to the model-only path so spend is tracked. Returns (findings, mode)."""
+    default_agents = "0" if llm.proxy_enabled() else "1"
+    use_agents = os.environ.get("USE_MANAGED_AGENTS", default_agents) == "1"
 
-    model_name = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
-    print(
-        f"ℹ️ Managed Agents unavailable ({last_exc}). Falling back to standard "
-        f"Gemini model ('{model_name}') …"
-    )
+    last_exc: Exception | None = None
+    if use_agents:
+        for attempt_try in (1, 2):
+            try:
+                text, interaction = _run_streaming(
+                    client,
+                    agent=BASE_AGENT,
+                    system_instruction=system_instruction,
+                    input=prompt,
+                    environment=environment,
+                )
+                raw = text or _extract_text(interaction)
+                return _parse_json(raw), "managed agent"
+            except Exception as exc:
+                last_exc = exc
+                print(f"⚠️  scan attempt (try {attempt_try}) failed: {exc}", file=sys.stderr)
+                if attempt_try == 1 and _is_connection_error(exc):
+                    continue  # transport hiccup: one more try
+                break
+
+    # Model-only path: the whole repo has no sandbox to explore, so inline the
+    # source. Routed through llm so a LiteLLM proxy tracks the spend.
+    model = llm.model_name()
+    via = "LiteLLM proxy" if llm.proxy_enabled() else "direct Gemini"
+    if use_agents and last_exc:
+        print(f"ℹ️ Managed Agents unavailable ({last_exc}). Scanning via {via} model ('{model}') …")
+    else:
+        print(f"ℹ️ Scanning via {via} model ('{model}') …")
     code = collect_repo_text(pathlib.Path.cwd())
     fallback_prompt = (
         build_scan_prompt(repo)
@@ -168,15 +178,15 @@ def run_scan(
         "line number.\n"
         + code
     )
-    response = client.models.generate_content(
-        model=model_name,
-        contents=fallback_prompt,
-        config={
-            "system_instruction": system_instruction,
-            "response_mime_type": "application/json",
-        },
+    raw = llm.generate_json(
+        prompt=fallback_prompt,
+        system_instruction=system_instruction,
+        kind="scan",
+        session=session,
+        genai_client=client,
+        model=model,
     )
-    return _parse_json(response.text or ""), f"fallback model ({model_name})"
+    return _parse_json(raw), f"model ({model}) via {via}"
 
 
 def render_report(repo: str, result: dict[str, Any], skill_title: str, mode: str) -> str:
@@ -298,9 +308,11 @@ def main() -> int:
     try:
         repo = os.environ["GITHUB_REPOSITORY"]
         gh_token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or ""
-        os.environ["GEMINI_API_KEY"]  # fail fast; the client reads it itself
     except KeyError as exc:
         print(f"❌ Missing required env variable: {exc}", file=sys.stderr)
+        return 1
+    if not os.environ.get("GEMINI_API_KEY") and not llm.proxy_enabled():
+        print("❌ Set GEMINI_API_KEY or LITELLM_BASE_URL.", file=sys.stderr)
         return 1
 
     api_url = os.environ.get("GITHUB_API_URL", "https://api.github.com")
@@ -331,8 +343,10 @@ def main() -> int:
 
     ctx = f"PR #{pr_number}" if pr_number else "the default branch"
     print(f"🔒 Scanning {repo} ({ctx}) with skill '{skill_name}' …")
-    client = genai.Client()
-    result, mode = run_scan(client, repo, environment, prompt, system_instruction)
+    client = genai.Client() if os.environ.get("GEMINI_API_KEY") else None
+    session = llm.session_id("scan", repo=repo, ref=pr_number)
+    result, mode = run_scan(client, repo, environment, prompt, system_instruction,
+                            session=session)
     findings = result.get("findings", [])
     print(f"Scan completed ({mode}): {len(findings)} finding(s).")
 
