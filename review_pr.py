@@ -416,8 +416,6 @@ def run_review(
         print(f"⚠️ {via} model ('{model}') failed: {model_exc}", file=sys.stderr)
         raise model_exc from last_exc
 
-    raise last_exc  # every attempt failed
-
 
 # --------------------------------------------------------------------------- #
 # Posting
