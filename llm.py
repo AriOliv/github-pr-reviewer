@@ -22,7 +22,9 @@ Env:
   LITELLM_API_KEY    proxy key / virtual key (sent as Bearer)
   LLM_MODEL          model name to request (default: GEMINI_MODEL or gemini-3.6-flash)
   LLM_SESSION_ID     override the derived session id
-  LITELLM_TIMEOUT    request timeout seconds (default 600)
+  LITELLM_TIMEOUT    read timeout seconds (default 600)
+  LITELLM_CONNECT_TIMEOUT  connect timeout seconds (default 15; fail fast if the
+                     proxy is unreachable from the runner)
 """
 
 from __future__ import annotations
@@ -114,9 +116,13 @@ def generate_json(
             "user": session,
             "response_format": {"type": "json_object"},
         }
-        to = timeout if timeout is not None else float(os.environ.get("LITELLM_TIMEOUT", "600"))
+        # Split connect vs read timeout: an unreachable proxy should fail in
+        # seconds, not hang for the whole read budget.
+        read_to = timeout if timeout is not None else float(os.environ.get("LITELLM_TIMEOUT", "600"))
+        connect_to = float(os.environ.get("LITELLM_CONNECT_TIMEOUT", "15"))
         resp = requests.post(
-            f"{base}/chat/completions", headers=headers, json=payload, timeout=to
+            f"{base}/chat/completions", headers=headers, json=payload,
+            timeout=(connect_to, read_to),
         )
         if resp.status_code >= 400:
             # LiteLLM puts the real reason (unknown model, auth, provider error)

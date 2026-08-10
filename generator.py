@@ -140,6 +140,35 @@ def generate_changes(
         raise ValueError(f"model did not return valid JSON: {exc}\n{raw[:500]}") from exc
 
 
+def _select_writable(
+    file_changes: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], list[str], list[str]]:
+    """(kept, skipped_workflow, unsafe) — drops repo-escaping and workflow paths."""
+    unsafe = [c.get("path", "") for c in file_changes if is_unsafe_path(c.get("path", ""))]
+    for p in unsafe:
+        print(f"⛔ Refusing unsafe path outside the repo: {p}", file=sys.stderr)
+    safe = [c for c in file_changes if not is_unsafe_path(c.get("path", ""))]
+    kept, skipped = filter_workflow_files(safe)
+    return kept, skipped, unsafe
+
+
+def _write_changes(kept: list[dict[str, Any]]) -> None:
+    for change in kept:
+        path = change["path"]
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(change.get("content", ""))
+        run_cmd(["git", "add", path])
+        print(f"  ✓ {path}")
+
+
+def _git_identity() -> None:
+    run_cmd(["git", "config", "user.name", "github-actions[bot]"])
+    run_cmd(["git", "config", "user.email", "github-actions[bot]@users.noreply.github.com"])
+
+
 def open_pr(
     *,
     branch: str,
@@ -152,17 +181,11 @@ def open_pr(
 ) -> tuple[bool, str]:
     """Write the changes to a fresh branch and open a PR. Returns (ok, url_or_err).
 
-    Skips .github/workflows/ files and notes the skip in the body. Opens the PR
-    as a draft when `draft=True` (used by the fix flow so review/CI don't run
-    until a human promotes it).
+    Skips .github/workflows/ and repo-escaping files. Opens the PR as a draft
+    when `draft=True` (fix flow, so review/CI wait for a human to promote it).
     """
     base = base or default_base()
-    # Drop paths that would escape the repo before anything else touches disk.
-    unsafe = [c.get("path", "") for c in file_changes if is_unsafe_path(c.get("path", ""))]
-    for p in unsafe:
-        print(f"⛔ Refusing unsafe path outside the repo: {p}", file=sys.stderr)
-    safe = [c for c in file_changes if not is_unsafe_path(c.get("path", ""))]
-    kept, skipped = filter_workflow_files(safe)
+    kept, skipped, unsafe = _select_writable(file_changes)
     if not kept:
         note = ", ".join(skipped + unsafe) or "none"
         return False, f"no pushable files (workflow/unsafe only: {note})"
@@ -172,20 +195,11 @@ def open_pr(
             f"token cannot push to `.github/workflows/`."
         )
 
-    run_cmd(["git", "config", "user.name", "github-actions[bot]"])
-    run_cmd(["git", "config", "user.email", "github-actions[bot]@users.noreply.github.com"])
+    _git_identity()
     # Branch off `base`, not the current HEAD: when open_pr runs in a loop
     # (fix_findings), each PR must be isolated, not stacked on the previous fix.
     run_cmd(["git", "checkout", "-B", branch, base])
-    for change in kept:
-        path = change["path"]
-        parent = os.path.dirname(path)
-        if parent:
-            os.makedirs(parent, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as fh:
-            fh.write(change.get("content", ""))
-        run_cmd(["git", "add", path])
-        print(f"  ✓ {path}")
+    _write_changes(kept)
     run_cmd(["git", "commit", "-m", title])
     run_cmd(["git", "push", "-u", "origin", branch, "--force"])
 
@@ -199,3 +213,29 @@ def open_pr(
     if res.returncode == 0:
         return True, res.stdout.strip()
     return False, (res.stderr.strip() or res.stdout.strip())
+
+
+def apply_to_branch(
+    *, branch: str, message: str, file_changes: list[dict[str, Any]]
+) -> tuple[bool, str]:
+    """Update an EXISTING branch in place (no PR): fetch it, write the changes,
+    commit, and push. Used by /refine to update an open PR. Returns (ok, info)."""
+    kept, skipped, unsafe = _select_writable(file_changes)
+    if not kept:
+        note = ", ".join(skipped + unsafe) or "none"
+        return False, f"no writable changes (workflow/unsafe only: {note})"
+
+    _git_identity()
+    fetched = run_cmd(["git", "fetch", "origin", branch], check=False)
+    if fetched.returncode != 0:
+        return False, f"branch '{branch}' not found on origin"
+    run_cmd(["git", "checkout", "-B", branch, f"origin/{branch}"])
+    _write_changes(kept)
+    if run_cmd(["git", "diff", "--cached", "--quiet"], check=False).returncode == 0:
+        return False, "the requested change produced no diff"
+    run_cmd(["git", "commit", "-m", message])
+    pushed = run_cmd(["git", "push", "origin", f"HEAD:{branch}"], check=False)
+    if pushed.returncode != 0:
+        return False, f"push failed: {pushed.stderr.strip()}"
+    extra = f" (skipped {', '.join(skipped + unsafe)})" if (skipped or unsafe) else ""
+    return True, f"updated {len(kept)} file(s){extra}"
